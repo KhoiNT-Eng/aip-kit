@@ -1,0 +1,594 @@
+#!/usr/bin/perl
+# aip acc - switch Codex / Claude Code SUBSCRIPTION logins by snapshot (macOS / Linux)
+#
+# Offline only: never talks to the network, never logs in and never refreshes
+# tokens itself. Logins are always done by the official `codex` / `claude`
+# CLIs; aip only moves their saved credentials between a local vault and the
+# live location, so the servers see nothing but the official CLIs.
+#
+# Live login locations (the "default" config dirs):
+#   Codex       ~/.codex/auth.json            (requires cli_auth_credentials_store = "file")
+#   Claude Code "claudeAiOauth" in macOS Keychain item "Claude Code-credentials"
+#               and/or ~/.claude/.credentials.json, plus "oauthAccount" in ~/.claude.json
+#               (other keys, e.g. MCP logins "mcpOAuth", are left untouched)
+# Vault:
+#   secrets   macOS -> Keychain items "aip-<tool>-<name>";  Linux -> <vault>/<tool>/<name>/secret.json (0600)
+#   metadata  ~/.aip/accounts/<tool>/<name>/meta.json  (email, ids - not secret)
+use strict;
+use warnings;
+use JSON::PP ();
+use MIME::Base64 qw(decode_base64);
+use File::Path qw(make_path remove_tree);
+use File::Basename qw(dirname);
+use File::Temp qw(tempfile);
+use Fcntl qw(:flock);
+use Cwd qw(realpath);
+use POSIX qw(strftime);
+
+my $HOME   = $ENV{HOME} || die "aip: HOME is not set\n";
+my $ROOT   = $ENV{AIP_ROOT} || "$HOME/.aip";
+my $VAULT  = "$ROOT/accounts";
+my $USER   = $ENV{USER} || (getpwuid($<))[0] || 'user';
+my $USE_KC = defined $ENV{AIP_KEYCHAIN} ? $ENV{AIP_KEYCHAIN} : ($^O eq 'darwin' ? 1 : 0);
+my $CLAUDE_KC = 'Claude Code-credentials';
+my $J = JSON::PP->new->canonical(1)->allow_nonref(1);
+my %P = (
+    codex_auth   => "$HOME/.codex/auth.json",
+    codex_config => "$HOME/.codex/config.toml",
+    claude_cred  => "$HOME/.claude/.credentials.json",
+    claude_state => "$HOME/.claude.json",
+);
+umask 077;
+
+# ---------------------------------------------------------------- utilities
+sub fail  { print STDERR "aip: $_[0]\n"; exit 1 }
+sub warnm { print STDERR "aip: warning: $_[0]\n" }
+sub info  { print "$_[0]\n" }
+
+sub slurp {
+    my $p = shift;
+    open(my $fh, '<:raw', $p) or return undef;
+    local $/;
+    my $c = <$fh>;
+    close $fh;
+    return $c;
+}
+
+# Atomic replace; follows a symlink to its target; keeps the existing mode.
+sub write_atomic {
+    my ($p, $content, $mode) = @_;
+    $p = realpath($p) // $p if -l $p;
+    my $dir = dirname($p);
+    make_path($dir, { mode => 0700 }) unless -d $dir;
+    $mode = (-e $p) ? ((stat $p)[2] & 07777) : 0600 unless defined $mode;
+    my ($fh, $tmp) = tempfile('.aip-XXXXXX', DIR => $dir);
+    binmode $fh;
+    print {$fh} $content or do { unlink $tmp; fail("cannot write $tmp: $!") };
+    close $fh or do { unlink $tmp; fail("cannot write $tmp: $!") };
+    chmod $mode, $tmp;
+    rename($tmp, $p) or do { unlink $tmp; fail("cannot replace $p: $!") };
+}
+
+sub run_capture {
+    my @cmd = @_;
+    my $pid = open(my $fh, '-|');
+    fail("cannot fork: $!") unless defined $pid;
+    if (!$pid) { open(STDERR, '>', '/dev/null'); exec(@cmd) or exit 127 }
+    local $/;
+    my $out = <$fh>;
+    close $fh;
+    return ($? >> 8, $out // '');
+}
+
+sub confirm {
+    my $q = shift;
+    print "$q [y/N] ";
+    my $a = <STDIN> // '';
+    return $a =~ /^\s*y(es)?\s*$/i;
+}
+
+# ------------------------------------------------ minimal JSON text surgery
+# Edits one top-level key of a JSON object in place and leaves every other
+# byte of the file untouched (Claude Code keeps a lot of state in these files).
+sub _ws { my ($t, $i) = @_; pos($$t) = $i; $$t =~ /\G\s*/gc; return pos($$t) // $i }
+
+sub _str_end {
+    my ($t, $i) = @_;
+    pos($$t) = $i;
+    return pos($$t) if $$t =~ /\G"(?:[^"\\]++|\\.)*+"/gcs;
+    die "aip: malformed JSON (string)\n";
+}
+
+sub _val_end {
+    my ($t, $i) = @_;
+    my $c = substr($$t, $i, 1);
+    return _str_end($t, $i) if $c eq '"';
+    if ($c eq '{' || $c eq '[') {
+        my $d = 0;
+        pos($$t) = $i;
+        while ($$t =~ /\G[^"{}\[\]]*+(.)/gcs) {
+            my $ch = $1;
+            if ($ch eq '"') { pos($$t) = _str_end($t, pos($$t) - 1); next }
+            if ($ch eq '{' || $ch eq '[') { $d++ } else { $d--; return pos($$t) if $d == 0 }
+        }
+        die "aip: malformed JSON (unterminated)\n";
+    }
+    pos($$t) = $i;
+    return pos($$t) if $$t =~ /\G[^,}\]\s]+/gc;
+    die "aip: malformed JSON (value)\n";
+}
+
+# Returns {k, vs, ve} (key start, value start, value end) or undef if absent.
+sub json_key_span {
+    my ($t, $key) = @_;
+    my $i = _ws($t, 0);
+    die "aip: not a JSON object\n" unless substr($$t, $i, 1) eq '{';
+    $i++;
+    while (1) {
+        $i = _ws($t, $i);
+        my $c = substr($$t, $i, 1);
+        return undef if $c eq '}';
+        die "aip: malformed JSON (object)\n" if $c eq '';
+        if ($c eq ',') { $i++; next }
+        die "aip: malformed JSON (key)\n" unless $c eq '"';
+        my $ks = $i;
+        my $ke = _str_end($t, $i);
+        my $name = eval { $J->decode(substr($$t, $ks, $ke - $ks)) };
+        $i = _ws($t, $ke);
+        die "aip: malformed JSON (colon)\n" unless substr($$t, $i, 1) eq ':';
+        my $vs = _ws($t, $i + 1);
+        my $ve = _val_end($t, $vs);
+        return { k => $ks, vs => $vs, ve => $ve } if defined $name && $name eq $key;
+        $i = $ve;
+    }
+}
+
+sub json_get_raw {
+    my ($text, $key) = @_;
+    return undef unless defined $text && $text =~ /\S/;
+    my $s = json_key_span(\$text, $key) or return undef;
+    my $raw = substr($text, $s->{vs}, $s->{ve} - $s->{vs});
+    return $raw eq 'null' ? undef : $raw;
+}
+
+sub json_set_raw {
+    my ($text, $key, $raw) = @_;
+    $text = "{}" unless defined $text && $text =~ /\S/;
+    my $s = json_key_span(\$text, $key);
+    if ($s) { substr($text, $s->{vs}, $s->{ve} - $s->{vs}) = $raw; return $text }
+    my $i = _ws(\$text, 0);
+    my $j = _ws(\$text, $i + 1);
+    my $ins = $J->encode($key) . ": $raw";
+    substr($text, $i + 1, 0) = substr($text, $j, 1) eq '}' ? $ins : "\n  $ins,";
+    return $text;
+}
+
+sub json_del {
+    my ($text, $key) = @_;
+    return $text unless defined $text && $text =~ /\S/;
+    my $s = json_key_span(\$text, $key) or return $text;
+    my $end = _ws(\$text, $s->{ve});
+    if (substr($text, $end, 1) eq ',') {
+        $end = _ws(\$text, $end + 1);
+        substr($text, $s->{k}, $end - $s->{k}) = '';
+        return $text;
+    }
+    my $before = substr($text, 0, $s->{k});
+    $before =~ s/,\s*\z//;
+    return $before . substr($text, $s->{ve});
+}
+
+# ------------------------------------------------------------- macOS Keychain
+sub kc_find {
+    my ($svc, $acct) = @_;
+    my @q = ('security', 'find-generic-password', '-s', $svc);
+    push @q, '-a', $acct if defined $acct;
+    my ($rc, $attrs) = run_capture(@q);
+    return () if $rc != 0;
+    my ($found) = $attrs =~ /"acct"<blob>="((?:[^"\\]|\\.)*)"/;
+    my ($rc2, $pw) = run_capture(@q, '-w');
+    return () if $rc2 != 0;
+    $pw =~ s/\r?\n\z//;
+    # `security -w` prints hex when the data is not plain text
+    if ($pw =~ /\A(?:[0-9a-fA-F]{2})+\z/) {
+        my $d = pack('H*', $pw);
+        $pw = $d if $d =~ /\A\s*\{/;
+    }
+    return ($found // $acct // $USER, $pw);
+}
+
+sub kc_write {
+    my ($svc, $acct, $data) = @_;
+    # Note: the value is passed on argv to /usr/bin/security for a few ms.
+    my $rc = system('security', 'add-generic-password', '-U', '-a', $acct, '-s', $svc, '-w', $data);
+    fail("Keychain write failed for '$svc' (unlock the login keychain and allow access)") if $rc != 0;
+}
+
+sub kc_delete {
+    my ($svc, $acct) = @_;
+    my ($rc) = run_capture('security', 'delete-generic-password', '-s', $svc, '-a', $acct);
+    return $rc == 0;
+}
+
+# ------------------------------------------------------------------- vault
+sub vdir     { "$VAULT/$_[0]/$_[1]" }
+sub kc_svc   { "aip-$_[0]-$_[1]" }
+
+sub vault_put {
+    my ($tool, $name, $secret, $meta, $acct_raw) = @_;
+    my $d = vdir($tool, $name);
+    make_path($d, { mode => 0700 }) unless -d $d;
+    chmod 0700, $VAULT, "$VAULT/$tool", $d;
+    if ($USE_KC) { kc_write(kc_svc($tool, $name), $USER, $secret) }
+    else         { write_atomic("$d/secret.json", $secret, 0600) }
+    write_atomic("$d/oauthAccount.json", $acct_raw, 0600) if defined $acct_raw;
+    $meta->{saved_at} = strftime('%Y-%m-%dT%H:%M:%S%z', localtime);
+    $meta->{store} = $USE_KC ? 'keychain' : 'file';
+    write_atomic("$d/meta.json", JSON::PP->new->canonical(1)->pretty->encode($meta), 0600);
+}
+
+sub vault_get {
+    my ($tool, $name) = @_;
+    my $d = vdir($tool, $name);
+    my $meta = eval { JSON::PP::decode_json(slurp("$d/meta.json") // '') } or return undef;
+    my $secret;
+    if (($meta->{store} // '') eq 'keychain') { (undef, $secret) = kc_find(kc_svc($tool, $name), $USER) }
+    else { $secret = slurp("$d/secret.json") }
+    return undef unless defined $secret && $secret =~ /\S/;
+    return { meta => $meta, secret => $secret, acct_raw => slurp("$d/oauthAccount.json") };
+}
+
+sub vault_list {
+    my $tool = shift;
+    my @out;
+    opendir(my $dh, "$VAULT/$tool") or return ();
+    for my $n (sort grep { valid_name($_) && -d "$VAULT/$tool/$_" } readdir $dh) {
+        my $m = eval { JSON::PP::decode_json(slurp("$VAULT/$tool/$n/meta.json") // '') } or next;
+        push @out, { name => $n, %$m };
+    }
+    closedir $dh;
+    return @out;
+}
+
+sub vault_find_id {
+    my ($tool, $id) = @_;
+    return undef unless defined $id;
+    for (vault_list($tool)) { return $_->{name} if ($_->{id} // '') eq $id }
+    return undef;
+}
+
+sub vault_rm {
+    my ($tool, $name) = @_;
+    my $m = eval { JSON::PP::decode_json(slurp(vdir($tool, $name) . '/meta.json') // '') } || {};
+    kc_delete(kc_svc($tool, $name), $USER) if ($m->{store} // '') eq 'keychain';
+    remove_tree(vdir($tool, $name));
+}
+
+# ------------------------------------------------------------ identities
+sub jwt_payload {
+    my @p = split /\./, (shift // '');
+    return undef unless @p >= 2;
+    (my $b = $p[1]) =~ tr{-_}{+/};
+    $b .= '=' x ((4 - length($b) % 4) % 4);
+    return eval { JSON::PP::decode_json(decode_base64($b)) };
+}
+
+sub codex_identity {
+    my $o = shift;
+    my $t = ref $o eq 'HASH' ? $o->{tokens} : undef;
+    return undef unless ref $t eq 'HASH';
+    my $p = jwt_payload($t->{id_token}) // {};
+    my $a = $p->{'https://api.openai.com/auth'} // {};
+    my $acct  = $t->{account_id} // $a->{chatgpt_account_id} // '';
+    my $email = $p->{email} // '';
+    return undef unless length($acct) || length($email);
+    return { id => "$email|$acct", email => ($email || '(unknown email)'), label => ($a->{chatgpt_plan_type} // '') };
+}
+
+sub claude_identity {
+    my $raw = shift;
+    return undef unless defined $raw;
+    my $o = eval { JSON::PP::decode_json($raw) };
+    return undef unless ref $o eq 'HASH';
+    my $email = $o->{emailAddress} // '';
+    my $uuid  = $o->{accountUuid} // '';
+    my $org   = $o->{organizationUuid} // '';
+    return undef unless length($email) || length($uuid);
+    return { id => "$email|$uuid|$org", email => ($email || '(unknown email)'), label => ($o->{organizationName} // '') };
+}
+
+sub refresh_of { my $o = eval { JSON::PP::decode_json($_[0]) }; return ref $o eq 'HASH' ? ($o->{refreshToken} // '') : '' }
+
+# ---------------------------------------------------------- live logins
+# Returns { in => bool (logged in), id, email, label, ... } for each tool.
+sub live_codex {
+    my $text = slurp($P{codex_auth});
+    return { in => 0 } unless defined $text && $text =~ /\S/;
+    my $o = eval { JSON::PP::decode_json($text) } or fail("~/.codex/auth.json is not valid JSON");
+    my $id = codex_identity($o);
+    return { in => 0, apikey => 1 } if !$id && $o->{OPENAI_API_KEY};
+    return { in => ($o->{tokens} ? 1 : 0), secret => $text, %{ $id // {} } };
+}
+
+sub live_claude {
+    my %r = (in => 0);
+    if ($USE_KC) {
+        my ($a, $d) = kc_find($CLAUDE_KC);
+        if (defined $d) { $r{kc_acct} = $a; $r{kc_text} = $d }
+    }
+    my $ft = slurp($P{claude_cred});
+    $r{file_text} = $ft if defined $ft && $ft =~ /\S/;
+    my $kc_tok = json_get_raw($r{kc_text}, 'claudeAiOauth');
+    my $f_tok  = json_get_raw($r{file_text}, 'claudeAiOauth');
+    if (defined $kc_tok && defined $f_tok && refresh_of($kc_tok) ne refresh_of($f_tok)) {
+        warnm("Keychain and ~/.claude/.credentials.json hold different Claude tokens; using the Keychain copy (the one Claude Code reads). aip writes both from now on.");
+    }
+    $r{secret} = $kc_tok // $f_tok;
+    $r{in} = defined $r{secret} ? 1 : 0;
+    $r{state_text} = slurp($P{claude_state});
+    $r{acct_raw} = json_get_raw($r{state_text}, 'oauthAccount');
+    if ($r{in}) {
+        my $ci = claude_identity($r{acct_raw});
+        @r{keys %$ci} = values %$ci if $ci;
+    }
+    return \%r;
+}
+
+sub live { $_[0] eq 'codex' ? live_codex() : live_claude() }
+
+sub write_live {
+    my ($tool, $secret, $acct_raw) = @_;
+    if ($tool eq 'codex') { write_atomic($P{codex_auth}, $secret, 0600); return }
+    my $l = live_claude();
+    my @targets;
+    push @targets, 'kc'   if $USE_KC && defined json_get_raw($l->{kc_text}, 'claudeAiOauth');
+    push @targets, 'file' if defined json_get_raw($l->{file_text}, 'claudeAiOauth');
+    @targets = ($USE_KC ? 'kc' : 'file') unless @targets;
+    for (@targets) {
+        if ($_ eq 'kc') { kc_write($CLAUDE_KC, $l->{kc_acct} // $USER, json_set_raw($l->{kc_text}, 'claudeAiOauth', $secret)) }
+        else { write_atomic($P{claude_cred}, json_set_raw($l->{file_text}, 'claudeAiOauth', $secret), 0600) }
+    }
+    write_atomic($P{claude_state}, json_set_raw($l->{state_text}, 'oauthAccount', $acct_raw)) if defined $acct_raw;
+}
+
+# Local logout for adding a new account: removes tokens locally, NO revoke.
+sub clear_live {
+    my $tool = shift;
+    if ($tool eq 'codex') { unlink $P{codex_auth} if -e $P{codex_auth}; return }
+    my $l = live_claude();
+    kc_write($CLAUDE_KC, $l->{kc_acct} // $USER, json_del($l->{kc_text}, 'claudeAiOauth'))
+        if $USE_KC && defined json_get_raw($l->{kc_text}, 'claudeAiOauth');
+    write_atomic($P{claude_cred}, json_del($l->{file_text}, 'claudeAiOauth'), 0600)
+        if defined json_get_raw($l->{file_text}, 'claudeAiOauth');
+}
+
+sub snapshot_live {
+    my ($tool, $name, $l) = @_;
+    vault_put($tool, $name, $l->{secret}, { tool => $tool, id => $l->{id}, email => $l->{email}, label => $l->{label} },
+              $tool eq 'claude' ? $l->{acct_raw} : undef);
+}
+
+# ------------------------------------------------------------- safety checks
+sub check_env {
+    my $tool = shift;
+    if ($tool eq 'codex') {
+        if ($ENV{CODEX_HOME} && (realpath($ENV{CODEX_HOME}) // $ENV{CODEX_HOME}) ne (realpath("$HOME/.codex") // "$HOME/.codex")) {
+            fail("CODEX_HOME is set to $ENV{CODEX_HOME}. 'aip acc' manages the default ~/.codex login; run 'aip use codex default' first.");
+        }
+        my $cfg = slurp($P{codex_config}) // '';
+        if ($cfg =~ /^\s*cli_auth_credentials_store\s*=\s*"(\w+)"/m && $1 ne 'file') {
+            fail("~/.codex/config.toml sets cli_auth_credentials_store = \"$1\", so tokens are not in auth.json. Set it to \"file\" and run 'codex login' again.");
+        }
+    } else {
+        if ($ENV{CLAUDE_CONFIG_DIR} && (realpath($ENV{CLAUDE_CONFIG_DIR}) // $ENV{CLAUDE_CONFIG_DIR}) ne (realpath("$HOME/.claude") // "$HOME/.claude")) {
+            fail("CLAUDE_CONFIG_DIR is set to $ENV{CLAUDE_CONFIG_DIR}. 'aip acc' manages the default ~/.claude login; run 'aip use claude default' first.");
+        }
+        for (qw(ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN)) {
+            warnm("\$$_ is set - Claude Code will use it instead of the subscription login.") if $ENV{$_};
+        }
+    }
+}
+
+sub running {
+    my $tool = shift;
+    my %seen;
+    my @hits;
+    my (undef, $comm) = run_capture('ps', '-e', '-o', 'pid=,comm=');
+    my (undef, $args) = run_capture('ps', '-e', '-o', 'pid=,args=');
+    my %argv;
+    for (split /\n/, $args) { $argv{$1} = $2 if /^\s*(\d+)\s+(.*)$/ }
+    for (split /\n/, $comm) {
+        next unless /^\s*(\d+)\s+(.*)$/;
+        my ($pid, $exe) = ($1, $2);
+        next if $pid == $$;
+        my $base = $exe; $base =~ s{.*/}{};
+        my $a = $argv{$pid} // '';
+        next if $a =~ /aip-acc/;
+        # test-only: the test suite limits detection to its own sandbox processes
+        next if $ENV{AIP_TEST_PROC_FILTER} && index("$exe $a", $ENV{AIP_TEST_PROC_FILTER}) < 0;
+        my $hit = $tool eq 'codex'
+            ? ($base =~ /^codex(-[\w.-]+)?$/ || $a =~ m{/\@openai/codex/})
+            : ($base eq 'claude' || $base eq 'Claude' || $a =~ m{/\@anthropic-ai/claude-code/});
+        push @hits, sprintf('  pid %-7s %s', $pid, substr($a || $exe, 0, 110)) if $hit && !$seen{$pid}++;
+    }
+    return @hits;
+}
+
+sub ensure_closed {
+    my ($tool, $force) = @_;
+    my @p = running($tool);
+    return unless @p;
+    print STDERR "Running $tool processes:\n", join("\n", @p), "\n";
+    if ($force) { warnm("continuing because of --force"); return }
+    if ($tool eq 'claude') {
+        fail("Close every Claude Code session (terminal, IDE plugins) and the Claude desktop app first.\n"
+           . "     A running session can overwrite the new login with the old account's tokens.\n"
+           . "     (--force skips this check; not recommended.)");
+    }
+    print "Running Codex sessions keep the old account until restarted; they will not overwrite the new login.\n";
+    exit 1 unless confirm('Continue?');
+}
+
+# Names become folder / Keychain item names: allow emails, block '..', leading '.' and separators.
+sub valid_name { my $n = shift // ''; return $n =~ /\A[A-Za-z0-9_][A-Za-z0-9._\@+-]{0,99}\z/ && index($n, '..') < 0 }
+
+sub check_name {
+    my $n = shift // '';
+    fail("profile name may use letters, digits and . _ - @ + (e.g. an email), must not start with '.' or contain '..' (got: '$n')")
+        unless valid_name($n);
+    fail("'default' is reserved") if $n eq 'default';
+}
+
+sub check_tool {
+    my $t = shift // '';
+    fail("tool must be 'codex' or 'claude' (got: '$t')") unless $t eq 'codex' || $t eq 'claude';
+}
+
+sub login_hint { $_[0] eq 'codex' ? "codex login" : "claude  (then /login)" }
+
+# Save the current live login into its matching vault entry before touching it.
+sub backfill_current {
+    my ($tool) = @_;
+    my $l = live($tool);
+    return undef unless $l->{in};
+    fail("Cannot identify the current $tool login (" . ($tool eq 'claude' ? 'oauthAccount missing in ~/.claude.json' : 'no account id in auth.json') . ").")
+        unless $l->{id};
+    my $cur = vault_find_id($tool, $l->{id});
+    fail("The current $tool login ($l->{email}) is not saved yet, so switching would lose it.\n     Save it first:  aip acc save $tool <name>")
+        unless $cur;
+    snapshot_live($tool, $cur, $l);    # keeps the freshest (rotated) tokens
+    return $cur;
+}
+
+# ---------------------------------------------------------------- commands
+sub cmd_save {
+    my ($tool, $name, $force) = @_;
+    check_tool($tool); check_name($name); check_env($tool);
+    my $l = live($tool);
+    fail("Codex is logged in with an API key; 'aip acc' is for ChatGPT subscription logins.") if $l->{apikey};
+    fail("No $tool login found. Log in first: " . login_hint($tool)) unless $l->{in};
+    fail("Cannot identify the current $tool login.") unless $l->{id};
+    my $dup = vault_find_id($tool, $l->{id});
+    fail("$l->{email} is already saved as '$dup'. Use: aip acc save $tool $dup") if $dup && $dup ne $name;
+    my $m = eval { JSON::PP::decode_json(slurp(vdir($tool, $name) . '/meta.json') // '') };
+    if ($m && ($m->{id} // '') ne $l->{id} && !$force) {
+        fail("'$tool/$name' holds another account ($m->{email}). Pick another name or add --force.");
+    }
+    snapshot_live($tool, $name, $l);
+    info("Saved $tool/$name  <$l->{email}>");
+}
+
+sub cmd_use {
+    my ($tool, $name, $force) = @_;
+    check_tool($tool); check_name($name); check_env($tool);
+    my $t = vault_get($tool, $name) or fail("No saved account '$tool/$name'. See: aip acc ls");
+    ensure_closed($tool, $force);
+    my $cur = backfill_current($tool);
+    if (defined $cur && $cur eq $name) { info("$tool is already using '$name' <$t->{meta}{email}> (tokens re-saved)."); return }
+    info("Saved latest tokens of '$cur'.") if defined $cur;
+    $t = vault_get($tool, $name);    # re-read (unchanged, but cheap)
+    write_live($tool, $t->{secret}, $t->{acct_raw});
+    my $after = live($tool);
+    if (($after->{id} // '') ne ($t->{meta}{id} // '')) {
+        if (defined $cur) { my $b = vault_get($tool, $cur); write_live($tool, $b->{secret}, $b->{acct_raw}) }
+        fail("Verification failed after writing '$name'; the previous login was restored.");
+    }
+    info("Switched $tool -> '$name' <$t->{meta}{email}>.");
+    info("Restart running $tool sessions (terminal, IDE plugin, desktop app) to use it.");
+}
+
+sub cmd_add {
+    my ($tool, $name, $force) = @_;
+    check_tool($tool); check_name($name); check_env($tool);
+    fail("'$tool/$name' already exists. Use a new name, or: aip acc save $tool $name") if -e vdir($tool, $name);
+    my ($rc) = run_capture('sh', '-c', "command -v $tool");
+    fail("'$tool' not found in PATH") if $rc != 0;
+    ensure_closed($tool, $force);
+    my $prev = backfill_current($tool);
+    info("Saved current login as '$prev'.") if defined $prev;
+    clear_live($tool);
+    info("Log in with the NEW account now (the old one stays saved; nothing is revoked).");
+    info("Tip: if the browser auto-selects your old account, sign out there or use a private window.");
+    if ($tool eq 'codex') { system('codex', 'login') }
+    else { info("Claude Code is starting: complete the login (type /login if not prompted), then /exit."); system('claude') }
+    my $l = live($tool);
+    if (!$l->{in} || !$l->{id}) {
+        if (defined $prev) { my $b = vault_get($tool, $prev); write_live($tool, $b->{secret}, $b->{acct_raw}); warnm("No new login detected - restored '$prev'.") }
+        fail("No new $tool login detected.");
+    }
+    my $dup = vault_find_id($tool, $l->{id});
+    if ($dup) {
+        snapshot_live($tool, $dup, $l);
+        fail("You logged into $l->{email}, which is already saved as '$dup' (now active). Nothing added.");
+    }
+    snapshot_live($tool, $name, $l);
+    info("Added $tool/$name  <$l->{email}>  (now active)");
+}
+
+sub cmd_ls {
+    my @tools = @_ ? @_ : ('codex', 'claude');
+    for my $tool (@tools) {
+        check_tool($tool);
+        my $l = eval { live($tool) } // { in => 0 };
+        info("$tool:");
+        my @a = vault_list($tool);
+        my $matched = 0;
+        for (@a) {
+            my $on = $l->{in} && ($l->{id} // '') eq ($_->{id} // '');
+            $matched ||= $on;
+            info(sprintf('  %s %-14s %s%s', $on ? '*' : ' ', $_->{name}, $_->{email} // '', $_->{label} ? "  ($_->{label})" : ''));
+        }
+        info("    (no saved accounts)") unless @a;
+        info("    live login " . ($l->{email} // '?') . " is not saved -> aip acc save $tool <name>") if $l->{in} && !$matched;
+        info("    not logged in") unless $l->{in};
+    }
+}
+
+sub cmd_rm {
+    my ($tool, $name) = @_;
+    check_tool($tool); check_name($name);
+    -d vdir($tool, $name) or fail("No saved account '$tool/$name'");
+    my $l = live($tool);
+    my $m = eval { JSON::PP::decode_json(slurp(vdir($tool, $name) . '/meta.json') // '') } || {};
+    info("This forgets the saved copy of $tool/$name <" . ($m->{email} // '?') . ">. Tokens are not revoked.");
+    info("(It is the live login right now; it stays logged in.)") if $l->{in} && ($l->{id} // '') eq ($m->{id} // '');
+    return info("Cancelled") unless confirm('Delete?');
+    vault_rm($tool, $name);
+    info("Deleted $tool/$name");
+}
+
+sub usage {
+    print <<'EOF';
+aip acc - switch Codex / Claude Code subscription logins (offline, official CLIs only)
+
+  aip acc ls [codex|claude]            list saved accounts (* = live login)
+  aip acc save <tool> <name>           save the account that is logged in now
+  aip acc add  <tool> <name>           log in another account with the official CLI and save it
+  aip acc use  <tool> <name>           switch the live login to a saved account
+  aip acc rm   <tool> <name>           forget a saved account (does not revoke)
+
+Options: --force  skip the running-session check (not recommended for claude)
+
+First time:   aip acc save codex work        (you are logged in as work)
+              aip acc add  codex personal    (logs in personal, keeps work)
+Switch:       aip acc use  codex work
+EOF
+}
+
+# -------------------------------------------------------------------- main
+my @args  = grep { !/^--?(f|force)$/ } @ARGV;
+my $force = (grep { /^--?(f|force)$/ } @ARGV) ? 1 : 0;
+my $cmd   = shift(@args) // 'ls';
+
+make_path($VAULT, { mode => 0700 }) unless -d $VAULT;
+chmod 0700, $ROOT, $VAULT;
+open(my $lock, '>>', "$VAULT/.lock") or fail("cannot open lock file");
+flock($lock, LOCK_EX | LOCK_NB) or fail("another 'aip acc' is running");
+
+if    ($cmd eq 'ls' || $cmd eq 'list')   { cmd_ls(@args) }
+elsif ($cmd eq 'save')                   { cmd_save($args[0], $args[1], $force) }
+elsif ($cmd eq 'use' || $cmd eq 'switch'){ cmd_use($args[0], $args[1], $force) }
+elsif ($cmd eq 'add')                    { cmd_add($args[0], $args[1], $force) }
+elsif ($cmd eq 'rm' || $cmd eq 'remove') { cmd_rm($args[0], $args[1]) }
+elsif ($cmd =~ /^(-h|--help|help)$/)     { usage() }
+else  { print STDERR "aip acc: unknown command '$cmd'\n"; usage(); exit 1 }

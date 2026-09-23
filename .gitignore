@@ -1,0 +1,91 @@
+=============== 
+#Unity generated
+===============
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Ll]ogs/
+/ExportedObj/
+/Recordings/
+
+=====================================
+#Visual Studio / MonoDevelop generated
+=====================================
+*.xcodeproj/
+*.svd
+*.userprefs
+/*.csproj
+*.pidb
+*.suo
+/*.sln
+*.user
+*.unityproj
+*.booproj
+*.tmp
+obj/
+bin/
+
+=============== 
+JetBrains generated
+===============
+**/JetBrains/
+.idea/
+JetBrains.meta
+
+============
+#OS generated
+============
+Thumbs.ds
+Thumbs.ds.meta
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+============
+#Applications
+============
+.vs/
+.vscode/
+.vsconfig
+
+#Python files ignore
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*,cover
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+out
+*.apk
+node_modules

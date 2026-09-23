@@ -1,0 +1,14 @@
+#!/usr/bin/perl
+# TEST MOCK ONLY - never used outside tests/run-tests.sh
+use strict; use JSON::PP; use MIME::Base64;
+my $f="$ENV{HOME}/.codex/auth.json"; mkdir "$ENV{HOME}/.codex";
+sub b64u { (my $s=encode_base64(shift,'')) =~ tr{+/}{-_}; $s =~ s/=+$//; $s }
+my $c = shift // '';
+if ($c eq 'login') {
+  exit 1 if $ENV{FAKE_LOGIN_FAIL};
+  my $p = b64u(encode_json({email=>$ENV{FAKE_EMAIL}, 'https://api.openai.com/auth'=>{chatgpt_account_id=>$ENV{FAKE_ACCT}, chatgpt_plan_type=>'plus'}}));
+  my $a = {OPENAI_API_KEY=>undef, tokens=>{id_token=>"h.$p.s", access_token=>"at-".int(rand 1e9), refresh_token=>"rt-$ENV{FAKE_EMAIL}-1", account_id=>$ENV{FAKE_ACCT}}, last_refresh=>"2026-09-23T00:00:00Z"};
+  open my $o,'>',$f; print $o JSON::PP->new->pretty->encode($a); print "Successfully logged in\n"; exit 0 }
+if ($c eq 'rotate') { my $a=decode_json(do{local(@ARGV,$/)=$f;<>}); $a->{tokens}{refresh_token} =~ s/-(\d+)$/"-".($1+1)/e; open my $o,'>',$f; print $o JSON::PP->new->pretty->encode($a); print "rotated to $a->{tokens}{refresh_token}\n"; exit 0 }
+if ($c eq 'whoami') { my $a=decode_json(do{local(@ARGV,$/)=$f;<>}); print "$a->{tokens}{account_id} $a->{tokens}{refresh_token}\n"; exit 0 }
+exec 'sleep', ($ENV{FAKE_SLEEP}||0);

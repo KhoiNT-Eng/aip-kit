@@ -1,0 +1,21 @@
+#!/usr/bin/perl
+# TEST MOCK ONLY - never used outside tests/run-tests.sh
+use strict; use JSON::PP;
+my $H=$ENV{HOME}; my $cf="$H/.claude/.credentials.json"; my $sf="$H/.claude.json"; mkdir "$H/.claude";
+my $kc = $ENV{FAKE_KC};
+sub rd { my $f=shift; -e $f ? decode_json(do{local(@ARGV,$/)=$f;<>}) : {} }
+sub wr { my ($f,$d)=@_; open my $o,'>',$f; print $o JSON::PP->new->canonical->encode($d) }
+sub get_store { if ($kc) { my $o=`security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null`; chomp $o; return $o ? decode_json($o) : {} } rd($cf) }
+sub put_store { my $d=shift; if ($kc) { system('security','add-generic-password','-U','-a',$ENV{USER}||'u','-s','Claude Code-credentials','-w',encode_json($d)) } else { wr($cf,$d) } }
+my $c = shift // '';
+if ($c eq 'rotate') { my $s=get_store(); $s->{claudeAiOauth}{refreshToken} =~ s/-(\d+)$/"-".($1+1)/e; put_store($s); print "rotated to $s->{claudeAiOauth}{refreshToken}\n"; exit 0 }
+if ($c eq 'whoami') { my $s=get_store(); my $st=rd($sf); print(($st->{oauthAccount}{emailAddress}//'-')." ".($s->{claudeAiOauth}{refreshToken}//'-')."\n"); exit 0 }
+if ($c eq '') {  # interactive session: logs in if no token
+  exec 'sleep', $ENV{FAKE_SLEEP} if $ENV{FAKE_SLEEP};
+  my $s=get_store();
+  if (!$s->{claudeAiOauth} && !$ENV{FAKE_LOGIN_FAIL}) {
+    $s->{claudeAiOauth}={accessToken=>"sk-ant-oat-".int(rand 1e9), refreshToken=>"sk-ant-ort-$ENV{FAKE_EMAIL}-1", expiresAt=>4102444800000, scopes=>["user:inference"], subscriptionType=>"max"};
+    put_store($s);
+    my $st=rd($sf); $st->{oauthAccount}={emailAddress=>$ENV{FAKE_EMAIL}, accountUuid=>"u-$ENV{FAKE_EMAIL}", organizationUuid=>"o-$ENV{FAKE_EMAIL}", organizationName=>"Org $ENV{FAKE_EMAIL}"}; wr($sf,$st);
+    print "Login successful\n" }
+  exit 0 }

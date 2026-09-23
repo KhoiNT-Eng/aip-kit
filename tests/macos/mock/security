@@ -1,0 +1,12 @@
+#!/usr/bin/perl
+# TEST MOCK ONLY - never used outside tests/run-tests.sh
+use strict; use JSON::PP;
+my $db = "$ENV{HOME}/.fake-keychain.json";
+my $k = -e $db ? decode_json(do { local(@ARGV,$/)=$db; <> }) : {};
+my $cmd = shift; my %o; my @a=@ARGV;
+while (@a) { my $x=shift @a; if ($x =~ /^-(w)$/ && (!@a || $a[0] =~ /^-/)) { $o{w_flag}=1 } elsif ($x =~ /^-(\w)$/) { $o{$1}= ($1 eq 'U') ? 1 : shift @a } }
+my @m = grep { $_->{s} eq $o{s} && (!defined $o{a} || $_->{a} eq $o{a}) } @{ $k->{items} ||= [] };
+if ($cmd eq 'find-generic-password') { exit 44 unless @m; if ($o{w_flag}) { print $m[0]{w}, "\n" } else { print "keychain: fake\n    \"acct\"<blob>=\"$m[0]{a}\"\n    \"svce\"<blob>=\"$m[0]{s}\"\n" } exit 0 }
+if ($cmd eq 'add-generic-password') { if (@m) { exit 45 unless $o{U}; $m[0]{w}=$o{w} } else { push @{$k->{items}}, {s=>$o{s},a=>$o{a},w=>$o{w}} } }
+elsif ($cmd eq 'delete-generic-password') { exit 44 unless @m; $k->{items} = [ grep { !($_->{s} eq $o{s} && $_->{a} eq $o{a}) } @{$k->{items}} ] }
+open my $fh,'>',$db; print $fh encode_json($k); exit 0;
