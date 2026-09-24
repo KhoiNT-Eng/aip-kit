@@ -36,7 +36,7 @@ eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3] got [$2]"
 has() { case "$2" in *"$3"*) ok "$1";; *) bad "$1" "output did not contain [$3]: $(printf '%s' "$2" | head -3)";; esac; }
 acc() { perl "$ACC" "$@" 2>&1; }
 perm() { if stat -f %Lp "$1" >/dev/null 2>&1; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
-fakeproc() { cp /bin/sleep "$T/fake/$1"; "$T/fake/$1" 30 & sleep 0.5; }
+fakeproc() { ln -sf /bin/sleep "$T/fake/$1"; "$T/fake/$1" 30 & sleep 0.5; }
 killfake() { pkill -f "$T/fake/$1" 2>/dev/null; sleep 0.2; }
 strip_oauth() { perl -0pe 's/"oauthAccount"\s*:\s*\{[^{}]*\}//s' "$1"; }
 

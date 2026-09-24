@@ -9,6 +9,12 @@ are always done by the official `codex` / `claude` CLIs.
 | **Env mode** `aip use` | Each account has its own config dir (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) | Terminals, several accounts at the same time |
 | **Snapshot mode** `aip acc` | Swaps the *default* login (`~/.codex`, `~/.claude`) | IDE plugins / apps that can't take env vars |
 
+## Requirements
+- macOS / Linux: bash 3.2+ or zsh; `perl` with JSON::PP (ships with macOS) for `aip acc`.
+- Windows: Windows PowerShell 5.1 or PowerShell 7+.
+- Codex: `cli_auth_credentials_store` must be `file` (the default) for `aip acc`.
+  Check: `grep cli_auth ~/.codex/config.toml` must not show `keyring` or `auto`.
+
 ## Test first (no install needed)
 Runs everything in a temporary sandbox with fake `codex` / `claude` / Keychain commands.
 Your real logins, `~/.codex`, `~/.claude` and Keychain are never touched.
@@ -60,10 +66,23 @@ Safety built in:
   refresh tokens are never lost.
 - Refuses to switch away from a login that isn't saved, or one it can't identify.
 - Claude: refuses while any Claude Code session or the Claude desktop app is running
-  (a running session could overwrite the new login). Codex: asks first.
+  (a running session could overwrite the new login). Close the IDE plugin session too.
+  Codex: asks first.
 - Verifies the result and restores the previous login if something went wrong.
 - Vault: macOS Keychain items `aip-<tool>-<name>`; Windows DPAPI-encrypted files;
   Linux files 0600. Folders 0700 / user-only ACL.
+
+### Before the first real switch: back up (macOS)
+```
+mkdir -m 700 ~/aip-backup
+cp ~/.codex/auth.json ~/.claude.json ~/aip-backup/
+security find-generic-password -s "Claude Code-credentials" -w > ~/aip-backup/claude-cred.json
+chmod 600 ~/aip-backup/*
+```
+Recovery: `cp ~/aip-backup/auth.json ~/.codex/`;
+`security add-generic-password -U -a "$USER" -s "Claude Code-credentials" -w "$(cat ~/aip-backup/claude-cred.json)"`;
+`cp ~/aip-backup/.claude.json ~/`. Worst case: log in again with the official CLI.
+Delete `~/aip-backup` once everything works (it holds live tokens).
 
 ## Env mode: `aip use`
 ```
