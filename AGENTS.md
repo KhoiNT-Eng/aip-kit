@@ -18,6 +18,12 @@ Claude Code) on one machine, macOS and Windows, from the terminal and from IDE p
   `cc-switch-cli` (OAuth proxy impersonating Codex, plaintext token DB, calls
   Anthropic usage API, can't switch Claude subscriptions).
 
+## Git rules
+- **Never commit, amend, push, tag or rebase on your own.** Only when the owner asks
+  explicitly in the current request. Approval of a design or a fix is not approval to commit.
+- When done, leave changes uncommitted and report what changed (`git status` / `git diff --stat`).
+- Don't stage or revert changes you didn't make (the owner may have local edits).
+
 ## Verified facts the design relies on
 **Codex** (`openai/codex` @ `30fc686`):
 - `cli_auth_credentials_store` default `file` -> `CODEX_HOME/auth.json`. `keyring`/`auto`
