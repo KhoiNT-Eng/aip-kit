@@ -377,7 +377,7 @@ sub check_env {
         }
         my $cfg = slurp($P{codex_config}) // '';
         if ($cfg =~ /^\s*cli_auth_credentials_store\s*=\s*"(\w+)"/m && $1 ne 'file') {
-            fail("~/.codex/config.toml sets cli_auth_credentials_store = \"$1\", so tokens are not in auth.json. Set it to \"file\" and run 'codex login' again.");
+            fail("~/.codex/config.toml sets cli_auth_credentials_store = \"$1\", so tokens are not in auth.json. Set it to \"file\" and run 'codex login --device-auth' again.");
         }
     } else {
         if ($ENV{CLAUDE_CONFIG_DIR} && (realpath($ENV{CLAUDE_CONFIG_DIR}) // $ENV{CLAUDE_CONFIG_DIR}) ne (realpath("$HOME/.claude") // "$HOME/.claude")) {
@@ -439,12 +439,23 @@ sub check_name {
     fail("'default' is reserved") if $n eq 'default';
 }
 
+# Turn a display value (usually the email) into a ready-to-copy name that check_name() accepts.
+sub suggest_name {
+    my $n = shift // '';
+    $n =~ s/[^A-Za-z0-9._\@+-]/-/g;
+    $n =~ s/\.{2,}/./g;
+    $n = "_$n" if $n ne '' && $n !~ /\A[A-Za-z0-9_]/;
+    $n = substr($n, 0, 100);
+    $n = '_default' if $n eq 'default';
+    return valid_name($n) ? $n : '<name>';
+}
+
 sub check_tool {
     my $t = shift // '';
     fail("tool must be 'codex' or 'claude' (got: '$t')") unless $t eq 'codex' || $t eq 'claude';
 }
 
-sub login_hint { $_[0] eq 'codex' ? "codex login" : "claude  (then /login)" }
+sub login_hint { $_[0] eq 'codex' ? "codex login --device-auth" : "claude  (then /login)" }
 
 # Save the current live login into its matching vault entry before touching it.
 sub backfill_current {
@@ -454,7 +465,7 @@ sub backfill_current {
     fail("Cannot identify the current $tool login (" . ($tool eq 'claude' ? 'oauthAccount missing in ~/.claude.json' : 'no account id in auth.json') . ").")
         unless $l->{id};
     my $cur = vault_find_id($tool, $l->{id});
-    fail("The current $tool login ($l->{email}) is not saved yet, so switching would lose it.\n     Save it first:  aip acc save $tool <name>")
+    fail("The current $tool login ($l->{email}) is not saved yet, so switching would lose it.\n     Save it first:  aip acc save $tool " . suggest_name($l->{email}))
         unless $cur;
     snapshot_live($tool, $cur, $l);    # keeps the freshest (rotated) tokens
     return $cur;
@@ -509,7 +520,8 @@ sub cmd_add {
     clear_live($tool);
     info("Log in with the NEW account now (the old one stays saved; nothing is revoked).");
     info("Tip: if the browser auto-selects your old account, sign out there or use a private window.");
-    if ($tool eq 'codex') { system('codex', 'login') }
+    # Device code login: the browser login flow revokes the previously logged-in session.
+    if ($tool eq 'codex') { system('codex', 'login', '--device-auth') }
     else { info("Claude Code is starting: complete the login (type /login if not prompted), then /exit."); system('claude') }
     my $l = live($tool);
     if (!$l->{in} || !$l->{id}) {
@@ -539,7 +551,10 @@ sub cmd_ls {
             info(sprintf('  %s %-14s %s%s', $on ? '*' : ' ', $_->{name}, $_->{email} // '', $_->{label} ? "  ($_->{label})" : ''));
         }
         info("    (no saved accounts)") unless @a;
-        info("    live login " . ($l->{email} // '?') . " is not saved -> aip acc save $tool <name>") if $l->{in} && !$matched;
+        if ($l->{in} && !$matched) {
+            if ($l->{id}) { info("    live login $l->{email} is not saved. Save it:\n      aip acc save $tool " . suggest_name($l->{email})) }
+            else          { info("    Cannot identify the live login; log in again: " . login_hint($tool)) }
+        }
         info("    not logged in") unless $l->{in};
     }
 }

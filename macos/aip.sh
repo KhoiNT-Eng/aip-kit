@@ -92,7 +92,8 @@ _aip_share() {
 _aip_login() {
   local tool="$1" dir="$2"
   if [ "$tool" = "codex" ]; then
-    CODEX_HOME="$dir" command codex login
+    # Device code login: the browser login flow revokes the previously logged-in session.
+    CODEX_HOME="$dir" command codex login --device-auth
   else
     echo "Claude Code will open; complete the login (run /login if not prompted), then /exit."
     CLAUDE_CONFIG_DIR="$dir" command claude

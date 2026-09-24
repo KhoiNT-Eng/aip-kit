@@ -48,12 +48,18 @@ and the hook; your profiles and saved accounts in `~/.aip` are kept.
 ## Snapshot mode: `aip acc`
 ```
 aip acc save codex work        # you are logged in as "work" now: save it
-aip acc add  codex personal    # logs in another account via `codex login`, keeps "work"
+aip acc add  codex personal    # logs in another account via `codex login --device-auth`, keeps "work"
 aip acc use  codex work        # switch (restart Codex sessions / IDE plugin afterwards)
 aip acc ls                     # * marks the live login
 aip acc rm   codex personal    # forget a saved copy (does not revoke)
 ```
 Same for `claude` (`add` starts `claude`; complete `/login`, then `/exit`).
+
+**Codex: always log in with `codex login --device-auth`** (aip does this for you). The
+browser login (`codex login`) ends the previously logged-in session, so the older saved
+account then fails with `workspace routing discovery unauthorized (401)`. To repair it:
+`aip acc use codex <that-account>` (or stay on it), `codex login --device-auth` with the
+same account, then `aip acc save codex <that-account>`.
 
 What gets swapped:
 - **Codex**: `~/.codex/auth.json` (needs `cli_auth_credentials_store = "file"`, the default).

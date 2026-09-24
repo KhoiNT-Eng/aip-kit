@@ -5,6 +5,7 @@ my $f="$ENV{HOME}/.codex/auth.json"; mkdir "$ENV{HOME}/.codex";
 sub b64u { (my $s=encode_base64(shift,'')) =~ tr{+/}{-_}; $s =~ s/=+$//; $s }
 my $c = shift // '';
 if ($c eq 'login') {
+  { open my $g, '>', "$ENV{HOME}/.codex-login-args"; print $g join(' ', $c, @ARGV) }
   exit 1 if $ENV{FAKE_LOGIN_FAIL};
   my $p = b64u(encode_json({email=>$ENV{FAKE_EMAIL}, 'https://api.openai.com/auth'=>{chatgpt_account_id=>$ENV{FAKE_ACCT}, chatgpt_plan_type=>'plus'}}));
   my $a = {OPENAI_API_KEY=>undef, tokens=>{id_token=>"h.$p.s", access_token=>"at-".int(rand 1e9), refresh_token=>"rt-$ENV{FAKE_EMAIL}-1", account_id=>$ENV{FAKE_ACCT}}, last_refresh=>"2026-09-23T00:00:00Z"};

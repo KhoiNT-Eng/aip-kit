@@ -109,7 +109,8 @@ function script:Invoke-AipTool([string]$Tool, [string]$Dir, [object[]]$ToolArgs)
 
 function script:Invoke-AipLogin([string]$Tool, [string]$Dir) {
     if ($Tool -eq 'codex') {
-        Invoke-AipTool 'codex' $Dir @('login')
+        # Device code login: the browser login flow revokes the previously logged-in session.
+        Invoke-AipTool 'codex' $Dir @('login', '--device-auth')
     } else {
         Write-Host "Claude Code will open; complete the login (run /login if not prompted), then /exit."
         Invoke-AipTool 'claude' $Dir @()

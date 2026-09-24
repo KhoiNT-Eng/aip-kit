@@ -8,6 +8,7 @@ function B64U([string]$s) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetB
 $c = if ($args.Count) { [string]$args[0] } else { '' }
 switch ($c) {
     'login' {
+        [IO.File]::WriteAllText((Join-Path $H '.codex-login-args'), ($args -join ' '))
         if ($env:FAKE_LOGIN_FAIL) { exit 1 }
         $payload = '{"email":"' + $env:FAKE_EMAIL + '","https://api.openai.com/auth":{"chatgpt_account_id":"' + $env:FAKE_ACCT + '","chatgpt_plan_type":"plus"}}'
         $json = '{"OPENAI_API_KEY":null,"tokens":{"id_token":"h.' + (B64U $payload) + '.s","access_token":"at","refresh_token":"rt-' + $env:FAKE_EMAIL + '-1","account_id":"' + $env:FAKE_ACCT + '"},"last_refresh":"2026-09-23T00:00:00Z"}'

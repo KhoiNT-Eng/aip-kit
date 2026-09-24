@@ -285,6 +285,16 @@ function script:AccCheckName([string]$n) {
     if (-not (AccValidName $n)) { AccFail "profile name may use letters, digits and . _ - @ + (e.g. an email), must not start with '.' or contain '..' (got: '$n')" }
     if ($n -eq 'default') { AccFail "'default' is reserved" }
 }
+# Turn a display value (usually the email) into a ready-to-copy name that AccCheckName accepts.
+function script:AccSuggestName([string]$n) {
+    $n = $n -creplace '[^A-Za-z0-9._@+-]', '-'
+    $n = $n -creplace '\.{2,}', '.'
+    if ($n -ne '' -and $n -cnotmatch '^[A-Za-z0-9_]') { $n = '_' + $n }
+    if ($n.Length -gt 100) { $n = $n.Substring(0, 100) }
+    if ($n -eq 'default') { $n = '_default' }
+    if (AccValidName $n) { return $n } else { return '<name>' }
+}
+function script:AccLoginHint([string]$tool) { if ($tool -eq 'codex') { 'codex login --device-auth' } else { 'claude, then /login' } }
 
 function script:AccSamePath([string]$a, [string]$b) {
     try { $a = [IO.Path]::GetFullPath($a).TrimEnd('\', '/'); $b = [IO.Path]::GetFullPath($b).TrimEnd('\', '/') } catch { }
@@ -298,7 +308,7 @@ function script:AccCheckEnv([string]$tool) {
         }
         $cfg = AccRead $script:AccP.codex_config
         if ($cfg -and $cfg -match '(?m)^\s*cli_auth_credentials_store\s*=\s*"(\w+)"' -and $Matches[1] -ne 'file') {
-            AccFail "config.toml sets cli_auth_credentials_store = `"$($Matches[1])`", so tokens are not in auth.json. Set it to `"file`" and run 'codex login' again."
+            AccFail "config.toml sets cli_auth_credentials_store = `"$($Matches[1])`", so tokens are not in auth.json. Set it to `"file`" and run 'codex login --device-auth' again."
         }
     } else {
         if ($env:CLAUDE_CONFIG_DIR -and -not (AccSamePath $env:CLAUDE_CONFIG_DIR (Join-Path $script:AccHome '.claude'))) {
@@ -353,7 +363,7 @@ function script:AccBackfill([string]$tool) {
     if (-not $l.in) { return $null }
     if (-not $l.id) { AccFail "Cannot identify the current $tool login." }
     $cur = AccFindId $tool $l.id
-    if (-not $cur) { AccFail "The current $tool login ($($l.email)) is not saved yet, so switching would lose it.`n     Save it first:  aip acc save $tool <name>" }
+    if (-not $cur) { AccFail "The current $tool login ($($l.email)) is not saved yet, so switching would lose it.`n     Save it first:  aip acc save $tool $(AccSuggestName $l.email)" }
     AccSnapshot $tool $cur $l
     return $cur
 }
@@ -363,7 +373,7 @@ function script:AccSave([string]$tool, [string]$name, [bool]$force) {
     AccCheckTool $tool; AccCheckName $name; AccCheckEnv $tool
     $l = AccLive $tool
     if ($l.apikey) { AccFail "Codex is logged in with an API key; 'aip acc' is for ChatGPT subscription logins." }
-    if (-not $l.in) { AccFail "No $tool login found. Log in first ($(if ($tool -eq 'codex') { 'codex login' } else { 'claude, then /login' }))." }
+    if (-not $l.in) { AccFail "No $tool login found. Log in first ($(AccLoginHint $tool))." }
     if (-not $l.id) { AccFail "Cannot identify the current $tool login." }
     $dup = AccFindId $tool $l.id
     if ($dup -and $dup -ne $name) { AccFail "$($l.email) is already saved as '$dup'. Use: aip acc save $tool $dup" }
@@ -402,7 +412,8 @@ function script:AccAdd([string]$tool, [string]$name, [bool]$force) {
     AccClearLive $tool
     Write-Host 'Log in with the NEW account now (the old one stays saved; nothing is revoked).'
     Write-Host 'Tip: if the browser auto-selects your old account, sign out there or use a private window.'
-    if ($tool -eq 'codex') { & $exe.Source login }
+    # Device code login: the browser login flow revokes the previously logged-in session.
+    if ($tool -eq 'codex') { & $exe.Source login --device-auth }
     else { Write-Host 'Claude Code is starting: complete the login (type /login if not prompted), then /exit.'; & $exe.Source }
     $l = AccLive $tool
     if (-not $l.in -or -not $l.id) {
@@ -431,7 +442,10 @@ function script:AccLs([string[]]$tools) {
             Write-Host ('  {0} {1,-14} {2}{3}' -f $mark, $a.name, $a.email, $lab)
         }
         if ($list.Count -eq 0) { Write-Host '    (no saved accounts)' }
-        if ($l.in -and -not $matched) { Write-Host "    live login $($l.email) is not saved -> aip acc save $tool <name>" }
+        if ($l.in -and -not $matched) {
+            if ($l.id) { Write-Host "    live login $($l.email) is not saved. Save it:"; Write-Host "      aip acc save $tool $(AccSuggestName $l.email)" }
+            else { Write-Host "    Cannot identify the live login; log in again: $(AccLoginHint $tool)" }
+        }
         if (-not $l.in) { Write-Host '    not logged in' }
     }
 }

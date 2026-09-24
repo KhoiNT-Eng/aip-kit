@@ -45,6 +45,7 @@ echo "== Codex"
 FAKE_EMAIL=a@x.com FAKE_ACCT=wsA codex login >/dev/null
 out=$(acc save codex work);                                   has "save current login" "$out" "Saved codex/work"
 out=$(FAKE_EMAIL=b@x.com FAKE_ACCT=wsB acc add codex personal); has "add second account via official login" "$out" "Added codex/personal"
+eq  "add logs in with --device-auth (browser login revokes the old session)" "$(cat "$HOME/.codex-login-args")" "login --device-auth"
 out=$(acc ls codex);                                          has "ls marks live account" "$out" "* personal"
 acc use codex work >/dev/null;                                eq  "switch to work" "$(codex whoami)" "wsA rt-a@x.com-1"
 codex rotate >/dev/null; codex rotate >/dev/null
@@ -52,6 +53,13 @@ acc use codex personal >/dev/null;                            eq  "switch to per
 acc use codex work >/dev/null;                                eq  "rotated token of work was saved back (no stale token)" "$(codex whoami)" "wsA rt-a@x.com-3"
 FAKE_EMAIL=c@x.com FAKE_ACCT=wsC codex login >/dev/null
 out=$(acc use codex personal);                                has "refuses to switch away from an unsaved login" "$out" "is not saved yet"
+has "use suggests a ready-to-run save command" "$out" "aip acc save codex c@x.com"
+out=$(acc ls codex);                                          has "ls suggests a ready-to-run save command" "$out" "aip acc save codex c@x.com"
+FAKE_EMAIL="Khoi Nguyen/..x" FAKE_ACCT=wsK codex login >/dev/null
+out=$(acc ls codex);                                          has "ls turns an invalid name into a valid one" "$out" "aip acc save codex Khoi-Nguyen-.x"
+printf '{"tokens":{"access_token":"x"}}' > "$HOME/.codex/auth.json"
+out=$(acc ls codex);                                          has "ls: unidentifiable login gets no save hint" "$out" "Cannot identify the live login"
+FAKE_EMAIL=c@x.com FAKE_ACCT=wsC codex login >/dev/null
 eq  "unsaved login left untouched" "$(codex whoami)" "wsC rt-c@x.com-1"
 out=$(acc save codex work);                                   has "refuses to overwrite another account's name" "$out" "holds another account"
 acc save codex third >/dev/null; acc use codex work >/dev/null
@@ -122,6 +130,7 @@ has "aip add/use sets CODEX_HOME to the profile" "$out" "$AIP_ROOT/codex/envtest
 out=$(bash -c "source '$KIT/macos/aip.sh'; FAKE_EMAIL=f@x.com FAKE_ACCT=wsF aip add codex me@mail.com >/dev/null; aip use codex me@mail.com; aip use codex ../x" 2>&1)
 has "env mode accepts an email name" "$out" "codex -> me@mail.com"
 has "env mode rejects path-like names" "$out" "must not start with"
+eq  "env mode logs in with --device-auth" "$(cat "$HOME/.codex-login-args")" "login --device-auth"
 
 echo "== Installer (old layout -> ~/.aip, in the sandbox)"
 H2="$T/insthome"; mkdir -p "$H2/.ai-profiles/codex/oldprof" "$H2/.ai-profiles/accounts/codex/work"

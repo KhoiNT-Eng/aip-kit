@@ -57,14 +57,23 @@ try {
     Has 'save current login' (Acc save codex work) 'Saved codex/work'
     $env:FAKE_EMAIL = 'b@x.com'; $env:FAKE_ACCT = 'wsB'
     Has 'add second account via official login' (Acc add codex personal) 'Added codex/personal'
+    Eq 'add logs in with --device-auth (browser login revokes the old session)' ([IO.File]::ReadAllText((Join-Path $env:AIP_TEST_HOME '.codex-login-args'))) 'login --device-auth'
     Has 'ls marks live account' (Acc ls codex) '* personal'
     Acc use codex work | Out-Null;     Eq 'switch to work' (codex whoami) 'wsA rt-a@x.com-1'
     codex rotate; codex rotate
     Acc use codex personal | Out-Null; Eq 'switch to personal' (codex whoami) 'wsB rt-b@x.com-1'
     Acc use codex work | Out-Null;     Eq 'rotated token of work was saved back (no stale token)' (codex whoami) 'wsA rt-a@x.com-3'
     $env:FAKE_EMAIL = 'c@x.com'; $env:FAKE_ACCT = 'wsC'; codex login | Out-Null
-    Has 'refuses to switch away from an unsaved login' (Acc use codex personal) 'is not saved yet'
+    $out = Acc use codex personal
+    Has 'refuses to switch away from an unsaved login' $out 'is not saved yet'
+    Has 'use suggests a ready-to-run save command' $out 'aip acc save codex c@x.com'
     Eq 'unsaved login left untouched' (codex whoami) 'wsC rt-c@x.com-1'
+    Has 'ls suggests a ready-to-run save command' (Acc ls codex) 'aip acc save codex c@x.com'
+    $env:FAKE_EMAIL = 'Khoi Nguyen/..x'; $env:FAKE_ACCT = 'wsK'; codex login | Out-Null
+    Has 'ls turns an invalid name into a valid one' (Acc ls codex) 'aip acc save codex Khoi-Nguyen-.x'
+    [IO.File]::WriteAllText((Join-Path (Join-Path $env:AIP_TEST_HOME '.codex') 'auth.json'), '{"tokens":{"access_token":"x"}}')
+    Has 'ls: unidentifiable login gets no save hint' (Acc ls codex) 'Cannot identify the live login'
+    $env:FAKE_EMAIL = 'c@x.com'; $env:FAKE_ACCT = 'wsC'; codex login | Out-Null
     Has "refuses to overwrite another account's name" (Acc save codex work) 'holds another account'
     Acc save codex third | Out-Null; Acc use codex work | Out-Null
     $env:FAKE_EMAIL = 'd@x.com'; $env:FAKE_ACCT = 'wsD'
@@ -135,6 +144,7 @@ try {
     Write-Host '== Env mode (aip use)'
     $env:FAKE_EMAIL = 'e@x.com'; $env:FAKE_ACCT = 'wsE'
     aip add codex envtest *>&1 | Out-Null
+    Eq 'env mode logs in with --device-auth' ([IO.File]::ReadAllText((Join-Path $env:AIP_TEST_HOME '.codex-login-args'))) 'login --device-auth'
     aip use codex envtest *>&1 | Out-Null
     Eq 'aip use sets CODEX_HOME to the profile' $env:CODEX_HOME (Join-Path (Join-Path $env:AIP_ROOT 'codex') 'envtest')
     Eq 'profile has its own login' (codex whoami) 'wsE rt-e@x.com-1'

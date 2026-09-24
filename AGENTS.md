@@ -26,6 +26,12 @@ Claude Code) on one machine, macOS and Windows, from the terminal and from IDE p
   to refresh if the on-disk `account_id` changed (no overwrite).
 - Refresh tokens rotate; reuse = forced re-login -> **backfill before every switch**.
 - Identity = `email|account_id` (Team members share `account_id`).
+- **Browser login (`codex login`) revokes the previously logged-in session** (verified
+  2026-09-24, codex 0.156.1): the older account then fails with
+  `workspace routing discovery unauthorized (401)` / `token_revoked` /
+  `refresh_token_invalidated`. aip therefore always runs `codex login --device-auth`.
+  Diagnose a saved login without touching `~/.codex`: copy it into a temp `CODEX_HOME`
+  and send `initialize` + `account/read` to `codex app-server` over stdio.
 
 **Claude Code** (closed source; docs + GitHub issues):
 - macOS token: Keychain service `Claude Code-credentials` (suffix `-<sha256(dir)[:8]>`
@@ -55,6 +61,9 @@ Installed: `~/.aip/{bin,codex/<n>,claude/<n>,accounts/<tool>/<n>,accounts/.lock}
   - Vault: macOS Keychain `aip-<tool>-<name>`; Linux `secret.json` 0600; Windows DPAPI.
   - `use`: env check -> process guard -> backfill -> write -> verify -> restore on mismatch.
   - `add`: backfill -> local clear (no revoke) -> official login -> save.
+  - Hints for an unsaved live login print a ready-to-copy `aip acc save <tool> <name>`;
+    the name is the displayed email, sanitized to a valid name (`suggest_name` /
+    `AccSuggestName`).
   - Names `^[A-Za-z0-9_][A-Za-z0-9._@+-]{0,99}$`, no `..`, `default` reserved.
 
 ## Test-only hooks (keep; test use only)
@@ -64,8 +73,8 @@ suites; suites abort if `codex`/`claude`/`security` don't resolve to the mocks.
 
 ## Commands
 ```bash
-bash tests/macos/run-tests.sh [--keep]               # expect 56 passed, 0 failed
-pwsh -NoProfile -File tests/windows/run-tests.ps1 [-Keep]   # expect 43 passed
+bash tests/macos/run-tests.sh [--keep]               # expect 62 passed, 0 failed
+pwsh -NoProfile -File tests/windows/run-tests.ps1 [-Keep]   # expect 49 passed
 perl -c macos/aip-acc && bash -n macos/aip.sh macos/install.sh
 LC_ALL=C grep -n '[^[:print:][:space:]]' windows/*.ps1 tests/windows/*.ps1  # must print nothing
 ```
@@ -89,8 +98,9 @@ change should make an existing test fail when reverted.
 - Test regex typos look like product bugs; inspect the real file before "fixing" code.
 
 ## Status / open items
-- macOS suite: 56/56 on real macOS (2026-09-24). Windows suite: 43/43 on pwsh 7.5 on
-  Linux only; untested on Windows PS 5.1 / real DPAPI / junctions.
-- Never exercised against real `codex login` / `claude /login` yet.
+- macOS suite: 62/62 on real macOS (2026-09-24). Windows suite: last green run was 43/43
+  on pwsh 7.5 on Linux; the 6 tests added for `--device-auth` / save hints have not run
+  yet (no pwsh on the Mac). Untested on Windows PS 5.1 / real DPAPI / junctions.
+- Real Codex snapshot switching used on macOS (2026-09-24). Claude `/login` not yet.
 - Ideas not built (ask the owner first): `aip init` + per-project PATH shim,
   `aip wrap` wrappers for IDE CLI paths, pre-switch backup ring (deliberately skipped).
